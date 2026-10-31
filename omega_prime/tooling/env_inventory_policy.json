@@ -289,7 +289,17 @@
     "GITHUB_REPOSITORY": "Set by the GitHub runner; the Desktop pre-job guard checks it against its repository allowlist and the event payload.",
     "GITHUB_EVENT_PATH": "Set by the GitHub runner; the Desktop pre-job guard reads the event payload there to refuse fork pull requests.",
     "GITHUB_PATH": "Set by the GitHub runner; after allowing a job, the Desktop pre-job guard appends the job's ~/.local/bin and ~/.cargo/bin there.",
-    "GITHUB_REF": "Set by the GitHub runner; the Desktop pre-job guard admits a public schedule only when this is refs/heads and the repository default branch."
+    "GITHUB_REF": "Set by the GitHub runner; the Desktop pre-job guard admits a public schedule only when this is refs/heads and the repository default branch.",
+    "CONTAINER_HOST": "Selects the Podman API endpoint inherited by the sandbox-control openshell/podman CLIs.",
+    "OPENSHELL_GATEWAY": "Selects the OpenShell gateway name used by the sandbox-control tools.",
+    "OPENSHELL_GATEWAY_ENDPOINT": "Selects a direct OpenShell gateway endpoint for the sandbox-control tools.",
+    "XDG_DATA_HOME": "Selects the XDG data directory inherited by the OpenShell CLI.",
+    "OMP_SANDBOX_ROOT": "Locates the omp-sandbox checkout whose Podman sandbox policy the sandbox-control tools apply.",
+    "OMP_SANDBOX_OPENSHELL": "Overrides the OpenShell CLI binary used by the sandbox-control tools.",
+    "OMP_SANDBOX_PODMAN": "Overrides the Podman binary used for sandbox leftover checks.",
+    "OMP_SANDBOX_PODMAN_IMAGE": "Selects the sandbox image the sandbox-control tools create from.",
+    "OMP_SANDBOX_POLICY": "Overrides the OpenShell policy file the sandbox-control tools apply.",
+    "OMEGA_PRIME_TASKS_FILE": "Overrides the Command Center tasks.json that sandbox lifecycle events update."
   },
   "helpers": {
     "omega_prime/commands/redteam_readiness.py:_first": {
@@ -806,7 +816,7 @@
   "metadata": {
     "token_selectors": [
       {
-        "site": "omega_prime/mcp_server.py:2186:args.token_env",
+        "site": "omega_prime/mcp_server.py:2190:args.token_env",
         "symbol": "_resolve_token",
         "source_sha256": "e04ec502c56de9c37869762a3519cac3470f599f455c9ec1b3343026091652d7",
         "reason": "The caller-selected environment key is an arbitrary MCP bearer-token selector, not a concrete setting name."

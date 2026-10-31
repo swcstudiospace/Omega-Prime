@@ -114,6 +114,10 @@ from omega_prime.tools.redteam import (
 )
 from omega_prime.tools.registry import ToolRegistry
 from omega_prime.tools.rlm import RLM_TOOL_NAMES, register_rlm_tools
+from omega_prime.tools.sandbox_control import (
+    SANDBOX_TOOL_NAMES,
+    register_sandbox_control_tools,
+)
 from omega_prime.tools.substrate_tools import (
     SUBSTRATE_TOOL_NAMES,
     register_substrate_tools,
@@ -649,6 +653,7 @@ def test_offered_schemas_include_growth_names_and_omit_an_extra_tool(tmp_path: P
     register_durable_surface_tools(registry, tmp_path)
     register_capacity_tools(registry)
     register_dispatch_tools(registry)
+    register_sandbox_control_tools(registry)
     register_rlm_tools(
         registry,
         OmegaPrimeAgent(
@@ -697,6 +702,7 @@ def test_offered_schemas_include_growth_names_and_omit_an_extra_tool(tmp_path: P
         + DURABLE_TOOL_NAMES
         + CAPACITY_TOOL_NAMES
         + DISPATCH_TOOL_NAMES
+        + SANDBOX_TOOL_NAMES
         + RLM_TOOL_NAMES
         + HARNESS_TOOL_NAMES
         + GOAL_TOOL_NAMES

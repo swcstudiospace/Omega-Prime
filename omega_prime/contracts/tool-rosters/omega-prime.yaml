@@ -14,7 +14,9 @@
 # names from register_ultrathink_tools, then Substrate names from
 # register_substrate_tools, then omega_capacity from
 # register_capacity_tools, then omega_dispatch, omega_jobs_status, and
-# omega_jobs_cancel from register_dispatch_tools, then RLM names from
+# omega_jobs_cancel from register_dispatch_tools, then sandbox_create,
+# sandbox_exec, sandbox_down, sandbox_status, and sandbox_list from
+# register_sandbox_control_tools, then RLM names from
 # register_rlm_tools
 # (gated: prime.rlm.enabled, default off — registered only when enabled),
 # then Harness names from register_harness_tools
@@ -161,6 +163,11 @@ tools:
   - omega_dispatch
   - omega_jobs_status
   - omega_jobs_cancel
+  - sandbox_create
+  - sandbox_exec
+  - sandbox_down
+  - sandbox_status
+  - sandbox_list
   - rlm_spawn
   - rlm_collect
   - rlm_list_subagents

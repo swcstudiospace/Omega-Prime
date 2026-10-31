@@ -1,0 +1,352 @@
+from __future__ import annotations
+
+import json
+import stat
+from collections.abc import Sequence
+from pathlib import Path
+
+import pytest
+from sbx_fakes import (
+    GH_TOKEN,
+    OPENAI_KEY,
+    PODMAN,
+    UUID,
+    FakeOpenShell,
+    make_config,
+    make_provider,
+)
+
+from omega_prime.sandbox_control.events import FanoutSink, OutboxSink
+from omega_prime.sandbox_control.provider import (
+    OpenShellSandboxProvider,
+    RunResult,
+    SandboxControlError,
+    exec_argv,
+    host_env,
+    owned_name,
+    safe_cwd,
+)
+from omega_prime.sdlc_events.sandbox import ReadinessInput, SandboxLifecycle
+
+
+def _lifecycles(provider: OpenShellSandboxProvider) -> list[SandboxLifecycle]:
+    return [e.lifecycle for e in provider.sink.events]  # type: ignore[attr-defined]
+
+
+@pytest.fixture
+def fake() -> FakeOpenShell:
+    return FakeOpenShell()
+
+
+@pytest.fixture
+def provider(tmp_path: Path, fake: FakeOpenShell) -> OpenShellSandboxProvider:
+    return make_provider(make_config(tmp_path), fake)
+
+
+def test_create_without_tools_probe_is_not_ready_and_fails_closed(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    out = provider.create("Fix Login!!", task_id="gb:00045")
+    assert out["name"].startswith("ompsbx-fix-login-")
+    assert out["phase"] == "Ready"
+    assert out["ready"] is False
+    assert "tools_probe_missing(#61)" in out["reasons"]
+    assert _lifecycles(provider) == [
+        SandboxLifecycle.CREATED,
+        SandboxLifecycle.NOT_READY,
+    ]
+    create = next(c for c, _ in fake.calls if c[1:3] == ["sandbox", "create"])
+    assert create[create.index("--from") + 1] == "localhost/omp-sandbox:0.1"
+    assert {"--detach", "--no-tty", "--no-auto-providers"} <= set(create)
+
+
+def test_create_ready_when_probe_says_connected(
+    provider: OpenShellSandboxProvider,
+) -> None:
+    provider.readiness_probe = lambda _name: ReadinessInput(
+        container_ready=True, tools_connected=True, skills_connected=True
+    )
+    out = provider.create("demo", task_id="gb:00045")
+    assert out["ready"] is True and out["reasons"] == []
+    assert _lifecycles(provider)[-1] is SandboxLifecycle.READY
+
+
+def test_create_not_ready_when_phase_never_ready(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    fake.phase_on_create = "Provisioning"
+    ticks = iter(range(100))
+    provider.clock = lambda: float(next(ticks))
+    provider.readiness_probe = lambda _n: ReadinessInput(
+        container_ready=True, tools_connected=True, skills_connected=True
+    )
+    out = provider.create("demo")
+    assert out["ready"] is False and "container_not_ready" in out["reasons"]
+
+
+@pytest.mark.parametrize(
+    ("connected", "policy", "reason"),
+    [(False, True, "gateway_not_connected"), (True, False, "policy_missing")],
+)
+def test_preflight_fails_closed(
+    provider: OpenShellSandboxProvider,
+    fake: FakeOpenShell,
+    connected: bool,
+    policy: bool,
+    reason: str,
+) -> None:
+    fake.connected = connected
+    if not policy:
+        provider.config.policy.unlink()
+    with pytest.raises(SandboxControlError) as err:
+        provider.create("demo")
+    assert err.value.code == "preflight_failed" and reason in err.value.reason
+    assert not any(c[1:3] == ["sandbox", "create"] for c, _ in fake.calls)
+
+
+def test_create_failure_is_redacted_and_reported(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    fake.create_rc = 1
+    with pytest.raises(SandboxControlError) as err:
+        provider.create("demo", task_id="gb:00045")
+    assert GH_TOKEN not in err.value.reason and "[REDACTED]" in err.value.reason
+    assert _lifecycles(provider) == [SandboxLifecycle.NOT_READY]
+    # The allocated name survives in the structured error so callers can
+    # check or delete it instead of retrying under a new name.
+    name = err.value.to_dict()["name"]
+    assert name.startswith("ompsbx-demo-")
+    assert provider.ownership is not None and provider.ownership.get(name)
+
+
+def test_create_timeout_keeps_the_allocated_name(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    real = provider.runner
+
+    def runner(argv: Sequence[str], stdin: str | None, seconds: float) -> RunResult:
+        if "create" in argv:
+            raise SandboxControlError("timeout", f"{seconds:.0f}s")
+        return real(argv, stdin, seconds)
+
+    provider.runner = runner
+    with pytest.raises(SandboxControlError) as err:
+        provider.create("demo")
+    out = err.value.to_dict()
+    assert out["error"] == "timeout" and out["name"].startswith("ompsbx-demo-")
+
+
+def test_exec_refuses_unowned_secret_env_and_escaping_cwd(
+    provider: OpenShellSandboxProvider,
+) -> None:
+    with pytest.raises(SandboxControlError, match="not_owned"):
+        provider.exec("osp-abc", ["true"])
+    with pytest.raises(SandboxControlError, match="secret_env_refused"):
+        provider.exec("ompsbx-demo-abc123", ["true"], env={"GITHUB_TOKEN": "x"})
+    with pytest.raises(SandboxControlError, match="bad_cwd"):
+        provider.exec("ompsbx-demo-abc123", ["true"], cwd="/sandbox/../etc")
+    with pytest.raises(SandboxControlError, match="bad_argv"):
+        provider.exec("ompsbx-demo-abc123", [])
+
+
+def test_exec_bounds_and_redacts_output(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    from omega_prime.sandbox_control.provider import RunResult
+
+    fake.exec_result = RunResult(3, "x" * 20000 + " " + OPENAI_KEY, "boom")
+    out = provider.exec("ompsbx-demo-abc123", ["make", "test"], cwd="/sandbox/work")
+    assert out["exit_code"] == 3 and out["truncated"] is True
+    assert len(out["stdout"]) == 8000 and OPENAI_KEY not in out["stdout"]
+    argv, _ = fake.calls[-1]
+    assert argv[-3:] == ["--", "make", "test"]
+    assert "--workdir" in argv and argv[argv.index("--workdir") + 1] == "/sandbox/work"
+    assert _lifecycles(provider) == []  # ad-hoc exec does not touch lifecycle
+
+
+def test_exec_report_exit_nonzero_emits_blocking_exit(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    from omega_prime.sandbox_control.provider import RunResult
+
+    assert provider.ownership is not None
+    provider.ownership.record("ompsbx-demo-abc123", "gb:00045")
+    fake.exec_result = RunResult(2, "", "")
+    provider.exec("ompsbx-demo-abc123", ["omp", "--version"], report_exit=True)
+    event = provider.sink.events[-1]  # type: ignore[attr-defined]
+    assert event.lifecycle is SandboxLifecycle.EXITED and event.exit_code == 2
+    assert event.task_id == "gb:00045" and event.blocking
+
+
+def test_exec_report_exit_timeout_blocks_with_unknown_exit(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    assert provider.ownership is not None
+    provider.ownership.record("ompsbx-demo-abc123", "gb:00045")
+
+    def timeout(argv: Sequence[str], stdin: str | None, seconds: float) -> RunResult:
+        raise SandboxControlError("timeout", f"{seconds:.0f}s")
+
+    provider.runner = timeout
+    with pytest.raises(SandboxControlError, match="timeout"):
+        provider.exec("ompsbx-demo-abc123", ["omp"], report_exit=True)
+    event = provider.sink.events[-1]  # type: ignore[attr-defined]
+    assert event.lifecycle is SandboxLifecycle.EXITED and event.exit_code is None
+    assert event.blocking and event.task_id == "gb:00045"
+    assert "exit_unknown:timeout" in event.reasons
+    with pytest.raises(SandboxControlError):
+        provider.exec("ompsbx-demo-abc123", ["ls"])  # untracked: no event
+    assert len(provider.sink.events) == 1  # type: ignore[attr-defined]
+
+
+def test_down_deletes_marks_teardown_and_verifies_leftovers(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    name = provider.create("demo", task_id="gb:00045")["name"]
+    assert provider.ownership is not None
+    out = provider.down(name)
+    assert out == {"name": name, "removed": True, "existed": True}
+    assert _lifecycles(provider)[-1] is SandboxLifecycle.REMOVED
+    assert provider.ownership.get(name) is None
+
+
+def test_down_reports_leftovers(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    name = provider.create("demo")["name"]
+    fake.leftover_containers = [f"openshell-default--{name}-d8eca4fc"]
+    with pytest.raises(SandboxControlError, match="leftovers"):
+        provider.down(name)
+    # A failed delete clears the teardown mark (later deaths are real again)
+    # but keeps the uuid so a retry still finds the supervisor container.
+    assert provider.ownership is not None and not provider.ownership.teardown(name)
+    assert provider.ownership.uuid_for(name) == UUID
+    fake.leftover_containers = [f"openshell-supervisor-{UUID}"]
+    with pytest.raises(SandboxControlError, match="supervisor"):
+        provider.down(name)  # status row is gone; uuid comes from the record
+    fake.leftover_containers = []
+    assert provider.down(name)["removed"] is True
+    assert provider.ownership.get(name) is None
+
+
+def test_down_fails_closed_when_podman_checks_fail(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    name = provider.create("demo", task_id="gb:00045")["name"]
+    fake.podman_rc = 125
+    with pytest.raises(SandboxControlError, match="leftover_check_failed"):
+        provider.down(name)
+    assert SandboxLifecycle.REMOVED not in _lifecycles(provider)
+    assert provider.ownership is not None and provider.ownership.get(name)
+
+
+def test_down_refuses_clipped_leftover_listings(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    name = provider.create("demo", task_id="gb:00045")["name"]
+    fake.podman_truncated = True
+    with pytest.raises(SandboxControlError, match="leftover_check_failed"):
+        provider.down(name)
+    assert SandboxLifecycle.REMOVED not in _lifecycles(provider)
+    assert provider.ownership is not None and provider.ownership.get(name)
+
+
+def test_leftover_listings_are_filtered_by_name_and_uuid(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    name = provider.create("demo", task_id="gb:00045")["name"]
+    provider.down(name)
+    podman = [argv for argv, _ in fake.calls if argv[0] == PODMAN]
+    assert {argv[1] for argv in podman} == {"ps", "volume"}
+    for argv in podman:
+        i = argv.index("--filter")
+        assert argv[i : i + 2] == ["--filter", f"name={name}"]
+
+
+def test_clipped_control_replies_are_errors(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    fake.openshell_truncated = True
+    with pytest.raises(SandboxControlError, match="control_output_truncated"):
+        provider.list_sandboxes()
+
+
+def test_preflight_resolves_bare_command_names_on_path(
+    tmp_path: Path, fake: FakeOpenShell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import dataclasses
+
+    config = make_config(tmp_path)
+    monkeypatch.setenv("PATH", str(Path(config.openshell).parent))
+    bare = dataclasses.replace(config, openshell="openshell")
+    assert make_provider(bare, fake).preflight() == []
+    missing = dataclasses.replace(config, openshell="no-such-openshell")
+    assert make_provider(missing, fake).preflight() == ["openshell_missing"]
+    explicit = dataclasses.replace(config, openshell=str(tmp_path / "nope"))
+    assert make_provider(explicit, fake).preflight() == ["openshell_missing"]
+
+
+def test_down_refuses_unowned(provider: OpenShellSandboxProvider) -> None:
+    with pytest.raises(SandboxControlError, match="not_owned"):
+        provider.down("osp-mvgrni40-3a9e4b")
+
+
+def test_status_and_list(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    assert provider.status("ompsbx-missing-000000") == {
+        "name": "ompsbx-missing-000000",
+        "exists": False,
+    }
+    name = provider.create("demo", task_id="gb:00045")["name"]
+    status = provider.status(name)
+    assert status["phase"] == "Ready" and status["owned"] is True
+    assert status["task_id"] == "gb:00045"
+    assert status["ready_condition"]["reason"] == "DependenciesReady"
+    rows = provider.list_sandboxes()
+    assert [r["name"] for r in rows] == [name]
+
+
+def test_outbox_sink_is_private_cloudevents(
+    provider: OpenShellSandboxProvider,
+) -> None:
+    outbox = provider.config.outbox
+    provider.sink = FanoutSink([OutboxSink(outbox)])
+    provider.create("demo")
+    lines = [json.loads(line) for line in outbox.read_text().splitlines()]
+    assert [x["type"] for x in lines] == ["op.sbx.created", "op.sbx.not_ready"]
+    assert stat.S_IMODE(outbox.stat().st_mode) == 0o600
+
+
+def test_exec_argv_drops_secret_base_env_and_sets_tty() -> None:
+    argv = exec_argv("/os", "ompsbx-a-1", ["omp"], tty=True)
+    assert "--tty" in argv and "--env" in argv
+    assert "TERM=xterm-256color" in argv
+    assert not any("TOKEN" in a or "KEY=" in a for a in argv)
+
+
+def test_owned_name_and_cwd_helpers() -> None:
+    assert owned_name("../../Weird Name", "abc123") == "ompsbx-weird-name-abc123"
+    assert owned_name("", "abc123") == "ompsbx-task-abc123"
+    assert safe_cwd("/sandbox/work/../x") == "/sandbox/x"
+    with pytest.raises(SandboxControlError):
+        safe_cwd("relative")
+
+
+def test_host_env_keeps_no_secrets() -> None:
+    env = host_env(
+        {"HOME": "/h", "PATH": "/bin", "GITHUB_PAT": "x", "ANTHROPIC_API_KEY": "y"}
+    )
+    assert env == {"HOME": "/h", "PATH": "/bin", "OPENSHELL_TELEMETRY_ENABLED": "false"}
+
+
+def test_config_from_env_never_falls_back_to_the_operator_home() -> None:
+    from omega_prime.sandbox_control.provider import SandboxConfig
+
+    bare = SandboxConfig.from_env({})
+    assert bare.openshell == "openshell"
+    assert str(bare.state_dir) == ".omega-prime"
+    homed = SandboxConfig.from_env({"HOME": "/h", "OMEGA_PRIME_STATE_DIR": "/s"})
+    assert homed.openshell == "/h/.local/opt/openshell/0.1.4/bin/openshell"
+    assert homed.outbox == Path("/s/events/outbox.jsonl")
+    assert homed.policy == Path("/workspace/omp-sandbox/sandbox/policy-podman.yaml")
