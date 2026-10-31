@@ -89,12 +89,18 @@ export function hostWorkDir(tier: Pick<SandboxTier, "workspaceHostPath" | "works
   return tier.hostRoot ? join(tier.hostRoot, "work") : null;
 }
 
+function isLink(p: string): boolean {
+  try { return lstatSync(p).isSymbolicLink(); } catch { return false; }
+}
+
+/** Refuse any of `dirs` the job replaced with a symlink. */
+function refuseLinked(dirs: string[], what: string) {
+  for (const d of dirs) if (isLink(d)) throw new Error(`${d} is a symlink; refusing to write ${what} through it`);
+}
+
 /** Refuse a `.claude` (or its `commands`) the job replaced with a symlink. */
 function refuseLinkedClaude(work: string) {
-  for (const d of [join(work, ".claude"), join(work, ".claude", "commands")]) {
-    try { if (lstatSync(d).isSymbolicLink()) throw new Error(`${d} is a symlink; refusing to write GSD commands through it`); }
-    catch (e: any) { if (e?.code !== "ENOENT") throw e; }
-  }
+  refuseLinked([join(work, ".claude"), join(work, ".claude", "commands")], "GSD commands");
 }
 
 /** Copy a trusted `.claude` tree into `work`, refusing a linked `.claude`. */
@@ -112,40 +118,64 @@ export const IN_SANDBOX_COPY =
   `set -e; s="$1"; test -f "$s/${MARKER}"; test ! -L .claude; test ! -L .claude/commands; ` +
   `mkdir -p .claude; cp -R "$s/.claude/." .claude/`;
 
+/** Convert GSD agents to .omp/agents. With a host work folder (the private folder, or a mounted worktree reached
+ *  through its pinned descriptor) the host converts, refusing linked agent folders and files just as copyClaude
+ *  refuses a linked `.claude`. Without one, the conversion runs inside the sandbox and must produce agents. */
+async function convertAgents(tier: SandboxTier, hostWork: string | null): Promise<number> {
+  if (hostWork) return writeOmpAgents(hostWork);
+  const c = await tier.exec(["node", "-e", IN_SANDBOX_CONVERT], { cwd: tier.workdir, timeoutMs: 60_000, input: "" });
+  if (c.code !== 0) throw new Error(`GSD agent conversion failed in sandbox: ${c.stderr.slice(-400)}`);
+  const ompAgents = Number(c.stdout.trim().split("\n").pop()) || 0;
+  if (!ompAgents) throw new Error("GSD agent conversion produced no .omp/agents (omp would report Unknown agent gsd-*)");
+  return ompAgents;
+}
+
 export async function ensureGsd(tier: SandboxTier & { hostRoot?: string }) {
   // On a mounted tier the workdir IS the mounted host tree (the workspace bind hides hostRoot/work inside
   // the sandbox), so every host-side GSD path keys off the pinned workspace when the tier has one.
   const hostWork = hostWorkDir(tier);
+  const shared = !!tier.workspaceHostPath;
   if (hostWork && existsSync(join(CACHE, MARKER))) {
     copyClaude(join(CACHE, ".claude"), hostWork);
-    return { source: "cache", cache: CACHE };
+    return { source: "cache", cache: CACHE, ompAgents: await convertAgents(tier, hostWork) };
   }
   const argv = ["npx", "-y", `@opengsd/gsd-core@${VERSIONS.gsdCore}`, "--claude", "--local", "--no-legacy-cleanup"];
-  if (!hostWork) {
-    const r = await tier.exec(argv, { timeoutMs: 600_000, input: "" });
+  const install = async (cwd?: string) => {
+    // Egress policy can take a moment to settle on a fresh sandbox (seen as connect EPERM via the proxy): retry a few times.
+    let r = { code: 1, stdout: "", stderr: "" } as Awaited<ReturnType<typeof tier.exec>>;
+    for (let i = 0; i < 4; i++) {
+      r = await tier.exec(argv, { ...(cwd ? { cwd } : {}), timeoutMs: 600_000, input: "" });
+      if (r.code === 0 || !/EPERM|ECONNRESET|ETIMEDOUT|EAI_AGAIN|rejected by your operating system/.test(r.stderr)) break;
+      await new Promise((res) => setTimeout(res, 15_000 * (i + 1)));
+    }
     if (r.code !== 0) throw new Error(`GSD-Core install failed in sandbox (exit ${r.code}): ${r.stderr.slice(-600)}`);
-    return { source: "installed-in-sandbox", cache: null };
+  };
+  if (!hostWork) {
+    await install();
+    return { source: "installed-in-sandbox", cache: null, ompAgents: await convertAgents(tier, null) };
   }
   // The work folder is the only host-visible folder the sandbox writes, so stage there in a fresh folder
   // the job never had. A mounted worktree is shared (the host and other jobs can write into it while npx
   // runs), so its install serves this job only and is checked and copied inside the sandbox; a private
   // work folder is checked on the host and fills the shared cache.
-  const shared = !!tier.workspaceHostPath;
   mkdirSync(hostWork, { recursive: true });
   const stage = mkdtempSync(join(hostWork, ".omp-gsd-install-"));
   try {
-    const r = await tier.exec(argv, { cwd: `${tier.workdir}/${basename(stage)}`, timeoutMs: 600_000, input: "" });
-    if (r.code !== 0) throw new Error(`GSD-Core install failed in sandbox (exit ${r.code}): ${r.stderr.slice(-600)}`);
+    await install(`${tier.workdir}/${basename(stage)}`);
     if (shared) {
       refuseLinkedClaude(hostWork);
       const c = await tier.exec(["sh", "-c", IN_SANDBOX_COPY, "sh", basename(stage)], { cwd: tier.workdir, timeoutMs: 60_000, input: "" });
       if (c.code !== 0) throw new Error(`GSD-Core install produced no ${MARKER} or .claude is a symlink (in-sandbox copy exit ${c.code}): ${c.stderr.slice(-600)}`);
-      return { source: "installed-in-sandbox", cache: null };
+      return { source: "installed-in-sandbox", cache: null, ompAgents: await convertAgents(tier, hostWork) };
     }
     if (!existsSync(join(stage, MARKER))) throw new Error("GSD-Core install produced no .claude/commands/gsd-plan-phase.md");
     const published = fillCache(join(stage, ".claude"));
     copyClaude(join(stage, ".claude"), hostWork);
-    return { source: "installed-in-sandbox", cache: published || existsSync(join(CACHE, MARKER)) ? CACHE : null };
+    return {
+      source: "installed-in-sandbox",
+      cache: published || existsSync(join(CACHE, MARKER)) ? CACHE : null,
+      ompAgents: await convertAgents(tier, hostWork),
+    };
   } finally { rmSync(stage, { recursive: true, force: true }); }
 }
 
@@ -155,3 +185,43 @@ export function gsdCommandsOnHost(tier: Pick<SandboxTier, "workspaceHostPath" | 
   const d = join(work, ".claude", "commands");
   return existsSync(d) ? readdirSync(d).filter((f) => f.startsWith("gsd-")).length : 0;
 }
+
+/** omp skips .claude/agents (Claude frontmatter is not its task-agent contract), so the GSD workflows'
+ *  `gsd-phase-researcher` / `gsd-planner` / `gsd-executor` ... spawns fail with "Unknown agent". Re-emit each
+ *  GSD agent as a project-level .omp/agents/<name>.md with only name + description; omitting `tools` gives
+ *  omp's default task-agent tool set (Claude tool names like Read/Bash/mcp__* do not map 1:1). */
+/** First body line of every generated agent file: only files carrying it are ever rewritten. */
+export const GENERATED_MARK = "<!-- omp-sandbox: generated from .claude/agents; project edits belong in a file without this line -->";
+
+export function writeOmpAgents(hostWork: string): number {
+  const src = join(hostWork, ".claude", "agents"); const dst = join(hostWork, ".omp", "agents");
+  refuseLinked([src, join(hostWork, ".omp"), dst], "GSD agents");
+  if (!existsSync(src)) return 0;
+  mkdirSync(dst, { recursive: true });
+  let n = 0;
+  for (const f of readdirSync(src).filter((x) => /^gsd-[a-z0-9-]+\.md$/.test(x))) {
+    const out = join(dst, f);
+    if (isLink(join(src, f)) || isLink(out)) continue;   // never read or write through a planted link
+    const text = readFileSync(join(src, f), "utf8");
+    const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(text);
+    if (!m) continue;
+    const field = (k: string) => (new RegExp(`^${k}:\\s*(.*)$`, "m").exec(m[1])?.[1] ?? "").trim().replace(/^["']|["']$/g, "");
+    const name = field("name") || f.replace(/\.md$/, ""); const description = field("description");
+    if (!description) continue;
+    // A project's own .omp/agents file (no generated mark) is kept as is and still counts as available.
+    if (existsSync(out) && !readFileSync(out, "utf8").includes(GENERATED_MARK)) { n++; continue; }
+    writeFileSync(out, `---\nname: ${JSON.stringify(name)}\ndescription: ${JSON.stringify(description)}\nspawns: "*"\n---\n${GENERATED_MARK}\n${m[2]}`);
+    n++;
+  }
+  return n;
+}
+
+/** Same conversion as writeOmpAgents, as a self-contained script run with cwd = the sandbox workdir. */
+export const IN_SANDBOX_CONVERT = String.raw`const fs=require("fs"),p=require("path");const src=".claude/agents",dst=".omp/agents";let n=0;const MARK=${JSON.stringify(GENERATED_MARK)};
+if(fs.existsSync(src)){fs.mkdirSync(dst,{recursive:true});for(const f of fs.readdirSync(src).filter(x=>/^gsd-[a-z0-9-]+\.md$/.test(x))){
+const t=fs.readFileSync(p.join(src,f),"utf8");const m=/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(t);if(!m)continue;
+const g=k=>((new RegExp("^"+k+":\\s*(.*)$","m").exec(m[1])||[])[1]||"").trim().replace(/^["']|["']$/g,"");
+const name=g("name")||f.replace(/\.md$/,""),d=g("description");if(!d)continue;const out=p.join(dst,f);
+if(fs.existsSync(out)&&!fs.readFileSync(out,"utf8").includes(MARK)){n++;continue;}
+fs.writeFileSync(out,"---\nname: "+JSON.stringify(name)+"\ndescription: "+JSON.stringify(d)+"\nspawns: \"*\"\n---\n"+MARK+"\n"+m[2]);n++;}}
+console.log(n)`;

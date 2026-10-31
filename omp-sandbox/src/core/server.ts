@@ -1,5 +1,5 @@
 // Newline-JSON stdio protocol between the Rust wrapper and the TS core.
-// in : {"id":"1","op":"up"|"run_gsd_stage"|"answer_question"|"sandbox_status"|"abort"|"down","args":{...}}
+// in : {"id":"1","op":"up"|"run_gsd_stage"|"answer_question"|"sandbox_status"|"abort"|"run_check"|"export_commits"|"down","args":{...}}
 // out: {"id":"1","ok":true,"result":...} | {"id":"1","ok":false,"error":"...","code":"stale_answer"|"path_refused"?}
 //      {"event":"question"|"stage_done"|"fallback",...}   (unsolicited)
 // Importing this module is side-effect free (tests import errorReply); the boot below runs only when this file
@@ -12,6 +12,7 @@ import { Core } from "./core.ts";
 import { StaleAnswerError, type AnswerInput } from "./omp-rpc.ts";
 import { PathRefused } from "./paths.ts";
 import type { Stage } from "./config.ts";
+import type { SeedRepo } from "./repo.ts";
 
 /** Pure failure mapping for the protocol: a refused path is distinguishable from a stale answer and from any other failure. */
 export function errorReply(e: unknown): { ok: false; error: string; code: string } {
@@ -20,7 +21,7 @@ export function errorReply(e: unknown): { ok: false; error: string; code: string
 }
 
 /** Wire args for `up` — exactly Core.up's options; Core validates them (allowedDir, mutual exclusion). */
-type UpArgs = { tiers?: string[]; seed?: string; workspace_host_path?: string };
+type UpArgs = { tiers?: string[]; seed?: string; workspace_host_path?: string; seed_repo?: SeedRepo; py_deps?: string; stage?: Array<{ from: string; to: string }> };
 
 /** One request line from the Rust Anda wrapper. Args are passed through; Core re-validates them at runtime (allowedDir, stageRoute). */
 type WireRequest = { id?: unknown; op: unknown; args?: Record<string, unknown>; access?: { via?: unknown; caller?: unknown } };
@@ -39,10 +40,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     if (req.access) core.access = { via: String(req.access.via ?? ""), caller: String(req.access.caller ?? "") };
     switch (req.op) {
       case "up": return core.up(a as UpArgs);
-      case "run_gsd_stage": return core.runStage({ stage: a.stage as Stage, gsdCommand: a.gsd_command as string, task: a.task as string, thinking: a.thinking as string | undefined, model: a.model as string | undefined, plan: a.plan as string | undefined });
+      case "run_gsd_stage": return core.runStage({ stage: a.stage as Stage, gsdCommand: a.gsd_command as string, task: a.task as string, thinking: a.thinking as string | undefined, model: a.model as string | undefined, plan: a.plan as string | undefined, fallbackPlan: "fallback_plan" in a ? (a.fallback_plan as string | null) : undefined, fallbackModel: (a.fallback_model as string | null | undefined) ?? undefined });
       case "answer_question": return core.answer(a.stage_id as string, a.request_id as string, { selected: a.selected as string[] | undefined, text: a.text as string | undefined, perQuestion: a.per_question as AnswerInput["perQuestion"] });
       case "sandbox_status": return core.status(a.stage_id as string | undefined);
       case "abort": return core.abort(a.stage_id as string);
+      case "run_check": return core.runCheck({ argv: a.argv as string[], cwd: a.cwd as string | undefined, timeout_ms: a.timeout_ms as number | undefined, label: a.label as string | undefined });
+      case "export_commits": return core.exportCommits({ out: a.out as string | undefined, includeDirty: a.include_dirty === true });
       case "down": return core.down();
       default: throw new Error(`unknown op ${String(req.op)}`);
     }

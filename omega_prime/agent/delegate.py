@@ -59,6 +59,7 @@ def delegate_task(
             engine_cwd = getattr(parent, "engine_cwd", None)
             routed = delegate_via_engine(
                 goals[0],
+                env=getattr(parent, "engine_env", None),
                 interrupt=getattr(parent, "interrupt", None),
                 stage=child_stage,
                 cwd=None if engine_cwd is None else str(engine_cwd),

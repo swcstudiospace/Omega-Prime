@@ -19,7 +19,10 @@ from typing import Any
 
 from omega_prime.dashboard.redact import redact_value
 
-_STATES = {"queued", "working", "blocked", "waiting_on_ove", "done", "failed"}
+# Public schema names (blocks.py and its tests use them).
+TASK_STATES = ("queued", "working", "blocked", "waiting_on_ove", "done", "failed")
+ITEM_FIELDS = ("id", "seq", "ask", "blocks", "since")
+_STATES = set(TASK_STATES)
 _RESULTS = {"ok", "failed", "stopped"}
 _PANE_ID = re.compile(r"^w[0-9A-Za-z]+:p[0-9A-Za-z]+$")
 
@@ -222,6 +225,10 @@ def _validated(data: dict[str, Any]) -> dict[str, Any]:
             elif category == "waiting_on_ove":
                 item["since"] = _optional_string(row, "since", prefix)
                 item["blocks"] = _string(row, "blocks", prefix)
+                # The owning task (blocks.py); kept only when the writer set it.
+                task_id = _optional_string(row, "task_id", prefix)
+                if task_id is not None:
+                    item["task_id"] = task_id
             else:
                 item["finished_at"] = _string(row, "finished_at", prefix)
                 result = _string(row, "result", prefix)

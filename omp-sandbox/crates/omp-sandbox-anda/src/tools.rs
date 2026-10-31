@@ -14,6 +14,8 @@ pub const TOOLS: &[(&str, &str)] = &[
     ("answer_question", "Answer a pending omp ask-dialog question (stale answers are rejected)"),
     ("sandbox_status", "Tier, stages, pending questions, models seen"),
     ("abort", "Abort a running stage"),
+    ("run_check", "Run an allowlisted build/test command (npm, npx, node, python3, git) in the sandbox workdir; receipt written"),
+    ("export_commits", "Export commits made in the seeded repo since its seed base as a git bundle on the host"),
     ("down", "Abort stages, dispose VM + sandbox, stop broker, report leftovers"),
     ("poll_events", "Drain queued sandbox events (question, stage_done, fallback, ...); waits up to wait_ms"),
 ];
@@ -91,7 +93,7 @@ mod tests {
 
     #[test]
     fn tool_surface() {
-        for t in ["up", "run_gsd_stage", "answer_question", "sandbox_status", "abort", "down", "poll_events"] { assert!(is_tool(t)); }
+        for t in ["up", "run_gsd_stage", "answer_question", "sandbox_status", "abort", "run_check", "export_commits", "down", "poll_events"] { assert!(is_tool(t)); }
         assert!(!is_tool("anda_auth_probe") && !is_tool("exec") && !is_tool(""));
     }
 }

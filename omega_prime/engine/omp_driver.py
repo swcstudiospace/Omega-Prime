@@ -80,6 +80,28 @@ _READY_TIMEOUT = 15.0
 _COMMAND_TIMEOUT = 15.0
 
 
+# Static ask/blocks texts for the waiting_on_ove item raised when a gated
+# stage cannot run. The box item shape has no detail field, so the exception
+# detail stays in EngineResult.detail and is not copied into the item.
+_ENGINE_ASK = {
+    "plan_not_allowed": (
+        "The stage's coding plan is not allowlisted, so the run was refused. "
+        "Allow the plan for this stage (its opt-in flag such as "
+        "OMEGA_PRIME_OMP_ALLOW_ZAI, or an API key on the allowlist) and "
+        "re-run the task."
+    ),
+    "sandbox_unavailable": (
+        "The engine sandbox tier is unavailable, so the run was refused. "
+        "Restore the sandbox binary (bwrap or the configured tier), or set "
+        "OMEGA_PRIME_ENGINE_UNSANDBOXED=1 explicitly, then re-run the task."
+    ),
+}
+_ENGINE_BLOCKS = {
+    "plan_not_allowed": "engine plan gate (plan_not_allowed)",
+    "sandbox_unavailable": "engine sandbox gate (sandbox_unavailable)",
+}
+
+
 _EOF = object()
 
 
@@ -331,6 +353,8 @@ def run(
     env: Mapping[str, str] | None = None,
     unsandboxed: bool | None = None,
     tmux: bool | None = None,
+    tasks_path: str | Path | None = None,
+    task_id: str | None = None,
     stage: str | None = None,
     ui_control: UIControlStore | None = None,
     cancel_event: _CancelEvent | None = None,
@@ -342,6 +366,13 @@ def run(
 
     ``stage`` (``plan`` or ``execute``) picks that stage's model and lets the
     router fall back from ChatGPT to Z.ai; see ``plan_router.select``.
+
+    ``tasks_path`` and ``task_id`` are optional dashboard context: when both
+    are set and the run fails the plan gate (``plan_not_allowed``) or the
+    sandbox gate (``sandbox_unavailable``), the same call raises one
+    ``waiting_on_ove`` item and blocks the task row before the failed
+    ``EngineResult`` returns. Without them, behaviour is unchanged.
+
     ``delegate_depth`` is the delegate depth of a child started by
     ``delegate_task``; omp's MCP server starts its delegate parent there, so
     nested delegates keep the parent's ``max_depth``. ``delegate_max_depth``
@@ -426,6 +457,25 @@ def run(
                     {"type": "job_end", "ok": False, "reason": str(reason or "engine")},
                 )
             write_json(directory / "session.json", metadata)
+        if (
+            tasks_path is not None
+            and task_id is not None
+            and reason in ("plan_not_allowed", "sandbox_unavailable")
+        ):
+            # Best-effort visibility: one waiting_on_ove item per stable id,
+            # raised before the failed result returns. Suppressed so a
+            # visibility failure can never mask or replace the engine
+            # failure below (W111-04).
+            with contextlib.suppress(Exception):
+                from omega_prime.dashboard.blocks import raise_block
+
+                raise_block(
+                    Path(tasks_path),
+                    f"{task_id}:{reason}",
+                    ask=_ENGINE_ASK[str(reason)],
+                    blocks=_ENGINE_BLOCKS[str(reason)],
+                    task_id=task_id,
+                )
         return EngineResult(
             False,
             token,
@@ -490,6 +540,29 @@ def _run(
         raise EngineError("not_configured", "omp is not on PATH")
     version = omp_version(binary, env)
     run_metadata.update({"job_id": job_id, "mode": mode, "omp_major": version[0]})
+    # The omp-sandbox backend branches before the bwrap gates. Selecting it
+    # is one explicit knob (OMEGA_PRIME_OMP_BACKEND=omp-sandbox) and never
+    # falls back to bwrap on failure; the lazy import keeps the bwrap path
+    # independent of the module.
+    from omega_prime.engine import sandbox_omp
+
+    if sandbox_omp.selected(env):
+        return sandbox_omp.run_backend(
+            prompt,
+            job_id=job_id,
+            directory=directory,
+            cwd=cwd,
+            system_prompt=system_prompt,
+            thinking=thinking,
+            plan=plan,
+            mode=mode,
+            env=env,
+            binary=binary,
+            omp_major=version[0],
+            stage=stage,
+            interrupt=cancel_event,
+            metadata=run_metadata,
+        )
     if not sandbox_ready(env, unsandboxed_override=unsandboxed):
         raise SandboxUnavailable(
             "bubblewrap is not available; set OMEGA_PRIME_ENGINE_UNSANDBOXED=1 "
@@ -1550,16 +1623,41 @@ def probe(
 
     With ``stage``, the stage's plan order (``plan`` first, else ChatGPT,
     then Z.ai) must have an allowlisted plan. ``plan`` is the caller's
-    requested plan, so the check matches what ``run(plan=..., stage=...)``
-    will select.
+    requested plan and ``stage`` the GSD stage, both exactly as
+    ``run(plan=..., stage=...)`` will receive them, so readiness accepts what
+    the router will select and refuses what it will refuse. With the
+    omp-sandbox backend selected a stageless turn is checked as the
+    ``execute`` stage it will run on.
     """
+    from omega_prime.engine import sandbox_omp
+
     binary = resolve_omp(env)
     if binary is None:
         return False, "not_configured"
+    backend = sandbox_omp.selected(env)
+    if backend:
+        stage = sandbox_omp.backend_stage(stage)
     try:
-        select(env, requested=plan, stage=stage)
+        choice = select(env, requested=plan, stage=stage)
+        if backend:
+            sandbox_omp.check_backend_plan(choice.decision.plan)
     except PlanNotAllowed:
         return False, "plan_not_allowed"
+    if backend:
+        # The backend's honest readiness, in its own order: the host omp
+        # binary still backs read_usage, so the same version check applies;
+        # bwrap readiness never gates the backend.
+        try:
+            omp_version(binary, env)
+        except EngineError as exc:
+            return False, exc.reason
+        if sandbox_omp.anda_binary(env) is None:
+            return False, "sandbox_unavailable"
+        if sandbox_omp.sandbox_root(env) is None:
+            return False, "sandbox_unavailable"
+        if not sandbox_omp.tools_waived(env):
+            return False, "sandbox_unavailable"
+        return True, "ok"
     if not sandbox_ready(env, unsandboxed_override=unsandboxed):
         return False, "sandbox_unavailable"
     try:

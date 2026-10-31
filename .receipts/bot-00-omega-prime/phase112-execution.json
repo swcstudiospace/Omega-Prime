@@ -1,0 +1,128 @@
+{
+  "task_id": "phase112-execution",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-21T17:12:00Z",
+  "completed_at": "2026-10-21T18:35:00Z",
+  "scope": "Execution of all three plans in .planning/phases/112-sbx3-engine-backend/ (task 00030 node n3, sbx-3 engine backend): 112-01 omp-sandbox folded-ops coverage (wave 1, parallel), 112-02 omega_prime/engine omp-sandbox backend (wave 1, parallel), 112-03 fake-Anda engine tests (wave 2, depends on 112-02), plus one parent-level retention-harness root-cause fix, phase 112-SUMMARY.md, ROADMAP tick, and this receipt. No push, no PR, no remotes.",
+  "plan": {
+    "note": "Wave-based execution per the phase plans; waves 1 (112-01 || 112-02, file-disjoint) then 2 (112-03).",
+    "waves": [
+      { "id": "prefix", "steps": ["Baseline: pytest -k acceptance (96 passed, 3 failed, 1 skipped, 49 collection errors), tsc exit 0, npm test 19/19", "Root-cause the 2 retention failures (subprocess sys.path lacks repo root; omega-prime not pip-installed)", "Fix _run_retention_producer to pass repo-root PYTHONPATH; assertions unchanged; commit 97c2877"], "status": "done" },
+      { "id": "wave1", "steps": ["112-01 (gsd-executor subagent): 3 tasks -> commits 77cf274, f434b76, da27928 + summary 25af193; tsc exit 0; npm test 27/27", "112-02 (gsd-executor subagent): 4 tasks -> commits 478eaea, f25565f, 4932c07, a21b853 + summary 67208a0; py_compile clean; engine suites 68 passed + 1 pre-existing mcp failure", "Parent spot-check: sandbox.py diff empty; _run branch between omp_version and sandbox_ready; probe branch after select with its own omp_version check; EngineResult unchanged"], "status": "done" },
+      { "id": "wave2", "steps": ["112-03 (gsd-executor subagent): 3 tasks -> commits 9386b4b, 00f70e3, 8db3346 + summary 2523971; 11 new tests all passing through the real run()"], "status": "done" },
+      { "id": "verify", "steps": ["Final acceptance commands at HEAD (below)", "Existing-test hygiene diff (empty over the six existing test files)", "112-SUMMARY.md with the per-test AUDIT C3/C4/C7 map", "ROADMAP Phase 112 checkbox ticked", "This receipt; final commit; git status clean"], "status": "done" }
+    ]
+  },
+  "commands": [
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/ -k \"engine or stage or sandbox or plan_router\" --continue-on-collection-errors  (BASELINE, before any change)",
+      "exit_code": 1,
+      "duration_s": 6.2,
+      "output_tail": "3 failed, 96 passed, 1 skipped, 3734 deselected, 49 errors — failures: test_mcp_desk_parent_reads_the_stage_from_its_env (ModuleNotFoundError: mcp, pre-existing) + 2 retention tests (FileNotFoundError on retained.json)",
+      "phase": "baseline"
+    },
+    {
+      "cmd": "edit omega_prime/tests/test_grokbot_readiness_cli.py (_run_retention_producer: env['PYTHONPATH'] = repo root) && python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_grokbot_readiness_cli.py -k stage",
+      "exit_code": 0,
+      "duration_s": 0.6,
+      "output_tail": "2 passed, 13 deselected — the real producer now runs; assertions untouched; committed 97c2877",
+      "phase": "prefix"
+    },
+    {
+      "cmd": "cd omp-sandbox && npx tsc --noEmit",
+      "exit_code": 0,
+      "duration_s": 2.1,
+      "output_tail": "no errors (exit 0) at final HEAD",
+      "phase": "acceptance"
+    },
+    {
+      "cmd": "cd omp-sandbox && npm test",
+      "exit_code": 0,
+      "duration_s": 2.0,
+      "output_tail": "tests 27, pass 27, fail 0, cancelled 0, skipped 0 (19 pre-existing unmodified + 8 new ops.test.ts)",
+      "phase": "acceptance"
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/ -k \"engine or stage or sandbox or plan_router\" --continue-on-collection-errors  (FINAL)",
+      "exit_code": 1,
+      "duration_s": 8.8,
+      "output_tail": "1 failed, 109 passed, 1 skipped, 3734 deselected, 49 errors — the single failure is the pre-existing mcp-import test; 109 = 96 baseline + 2 retention fixes + 11 new tests",
+      "phase": "acceptance"
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_engine_omp_sandbox.py",
+      "exit_code": 0,
+      "duration_s": 2.5,
+      "output_tail": "11 passed in 2.21s (unprefixed; the PYTHONPATH=. prefix breaks pytest in this sandbox)",
+      "phase": "acceptance"
+    },
+    {
+      "cmd": "git diff 97c2877..HEAD --stat -- omp-sandbox/tests/core.test.ts omp-sandbox/tests/paths.test.ts omp-sandbox/tests/guards.test.ts omega_prime/tests/test_engine.py omega_prime/tests/test_engine_stage.py omega_prime/tests/test_dashboard_blocks.py; git diff 97c2877..HEAD -- omega_prime/engine/sandbox.py | wc -l",
+      "exit_code": 0,
+      "duration_s": 0.2,
+      "output_tail": "empty diff for all six existing test files; 0 lines for sandbox.py (bwrap path byte-identical)",
+      "phase": "hygiene"
+    },
+    {
+      "cmd": "git add .planning/phases/112-sbx3-engine-backend/112-SUMMARY.md .planning/ROADMAP.md .receipts/bot-00-omega-prime/phase112-execution.json && git commit -m '00013 - phase 112 summary, roadmap tick, execution receipt' && git status --porcelain",
+      "exit_code": 0,
+      "duration_s": 0.4,
+      "output_tail": "final commit on feat/sbx-3-engine-backend; working tree clean afterward (node_modules/caches ignored)",
+      "phase": "commit"
+    }
+  ],
+  "claims": [
+    { "claim": "With OMEGA_PRIME_OMP_BACKEND=omp-sandbox one engine run drives a plan stage then an execute stage through the (fake) Anda wrapper with plan=zai requested: model ids zai/glm-5.3 then zai/glm-5.3-flash, EngineResult.sandbox == 'omp-sandbox', exported commits reported and applied in the worktree (node n3 acceptance; audit C4 + C7)", "evidence_command_index": [5, 4] },
+    { "claim": "With the env unset run behaviour is byte-identical bwrap: sandbox.py diff is empty, the six existing test files' diffs are empty, and the combined acceptance run is green except the documented pre-existing mcp failure", "evidence_command_index": [6, 4] },
+    { "claim": "PlanNotAllowed and wrapper/tier-unavailable failures return reasons plan_not_allowed / sandbox_unavailable and raise exactly one waiting_on_ove item each through run()'s existing phase-111 wiring (test_plan_not_allowed_raises_one_item_without_spawning, test_tier_unavailable_raises_exactly_one_sandbox_item)", "evidence_command_index": [5] },
+    { "claim": "A worktree outside OMP_SANDBOX_WORKSPACE_ROOTS is refused (path_refused) before the wrapper process starts (test_allowlist_refusal_precedes_any_wrapper_spawn; sandbox-side refusal also covered by ops.test.ts seed refusal)", "evidence_command_index": [5, 4] },
+    { "claim": "omp-sandbox acceptance: npx tsc --noEmit exit 0 and npm test green including the new folded-ops tests (27/27), no existing test weakened, skipped or deleted", "evidence_command_index": [2, 3, 6] },
+    { "claim": "No secret-shaped value lands in any durable artifact (runtime-built ZAI_API_KEY-shaped value scanned against events.jsonl, session.json, tasks.json, wrapper receipts); no token values in this receipt or any commit", "evidence_command_index": [5] },
+    { "claim": "The 2 pre-existing retention failures inside the acceptance filter were fixed at root cause (subprocess PYTHONPATH), not weakened; the remaining failure is the pre-existing missing-mcp environment gap, identical at baseline", "evidence_command_index": [0, 1, 4] }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Live interoperability with the real omp-sandbox-anda binary, real podman tiers and real Z.ai model calls is sbx-5 (node n7), out of scope for this phase; all proofs use the protocol-faithful fake wrapper",
+    "gsd-executor subagent verdicts are agent-reported; the parent re-verified all acceptance commands, the diff hygiene and the git state directly (commands 2-7)",
+    "The 49 pre-existing collection errors (optional deps absent: mcp, tweepy, telegram, ...) were not fixed — outside phase scope and not in the acceptance filter's passing set; counted only to show they are unchanged from baseline",
+    "Herdr pane and tasks.json row per run (sbx-4, node n4) are not built here; question forwarding into waiting_on_ove with answer_question round-trips is likewise n4"
+  ],
+  "files_changed": [
+    "omp-sandbox/tests/ops.test.ts (new)",
+    "omp-sandbox/src/core/core.ts (test-only attachTierForTests seed seam)",
+    "omp-sandbox/tests/fake-omp.mjs (prompt-log content)",
+    "omp-sandbox/package.json (test script registration)",
+    "omega_prime/engine/sandbox_omp.py (new)",
+    "omega_prime/engine/omp_driver.py (_run + probe backend branches)",
+    "omega_prime/engine/attach.py (engine_plan keyword)",
+    "omega_prime/tests/test_engine_omp_sandbox.py (new)",
+    "omega_prime/tests/test_grokbot_readiness_cli.py (retention producer subprocess PYTHONPATH)",
+    ".planning/phases/112-sbx3-engine-backend/112-01-SUMMARY.md",
+    ".planning/phases/112-sbx3-engine-backend/112-02-SUMMARY.md",
+    ".planning/phases/112-sbx3-engine-backend/112-03-SUMMARY.md",
+    ".planning/phases/112-sbx3-engine-backend/112-SUMMARY.md",
+    ".planning/ROADMAP.md",
+    ".receipts/bot-00-omega-prime/phase112-execution.json"
+  ],
+  "commits": [
+    "97c2877 00013 - tests: retention producer subprocess gets the repo root on PYTHONPATH",
+    "77cf274 00013 - omp-sandbox: seed_repo and export_commits coverage through the test seed seam (W112-01)",
+    "f434b76 00013 - omp-sandbox: run_check gate, receipt, and py_deps staging coverage (W112-01)",
+    "478eaea 00013 - engine: Anda stdio client sandbox_omp.py (W112-02)",
+    "da27928 00013 - omp-sandbox: runStage stage/plan routing and exact GSD prompt coverage (W112-01)",
+    "25af193 00013 - phase 112: plan 112-01 summary (W112-01)",
+    "f25565f 00013 - engine: omp-sandbox backend selection, workspace allowlist, probe and _run branch (W112-02)",
+    "4932c07 00013 - engine: engine_plan pass-through on delegate_via_engine and ultrathink_engine (W112-03)",
+    "a21b853 00013 - engine: one EngineResult contract for the omp-sandbox backend (W112-04)",
+    "67208a0 00013 - phase 112: plan 112-02 summary (W112-02..W112-04)",
+    "9386b4b 00013 - tests: fake Anda wrapper and fixtures for the omp-sandbox backend (W112-05)",
+    "00f70e3 00013 - tests: run contract — ordering, results back, tier and plan gates, abort, attach pass-through (W112-05)",
+    "8db3346 00013 - tests: guards — allowlist before spawn, bwrap default, no secrets, questions as events (W112-05)",
+    "2523971 00013 - phase 112: plan 112-03 summary (W112-05)",
+    "(final) 00013 - phase 112 summary, roadmap tick, execution receipt"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "git revert of the commit range 97c2877..HEAD restores the pre-phase tree (planning commit 49713a4); no data migration, no external state touched",
+  "approvals": [],
+  "approved_by": null
+}

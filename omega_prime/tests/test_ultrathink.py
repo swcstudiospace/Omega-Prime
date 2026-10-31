@@ -499,3 +499,13 @@ def test_doctor_ultrathink_row(tmp_path, monkeypatch, state, status, root_kind, 
         "message",
         "fix_hint",
     }
+
+
+def test_engine_child_env_carries_the_ship_opt_in() -> None:
+    """The engine's omp (and its MCP child) gets the checkout and the opt-in."""
+    from omega_prime.engine.jobs import child_env
+
+    child = child_env({"ULTRATHINK_ROOT": "/srv/ut", "ULTRATHINK_SHIP": "1"})
+    assert child["ULTRATHINK_ROOT"] == "/srv/ut"
+    assert child["ULTRATHINK_SHIP"] == "1"
+    assert "ULTRATHINK_SHIP" not in child_env({"ULTRATHINK_ROOT": "/srv/ut"})

@@ -95,8 +95,11 @@
     "OMEGA_PRIME_OMP_ALLOW_CURSOR": "Enables the Cursor plan in engine model routing.",
     "OMEGA_PRIME_OMP_ALLOW_XAI": "Enables the xAI plan in engine model routing.",
     "OMEGA_PRIME_OMP_ALLOW_ZAI": "Enables the Z.ai plan in engine model routing.",
+    "OMEGA_PRIME_OMP_BACKEND": "Selects the omp engine backend; omp-sandbox routes engine stages through the omp-sandbox wrapper instead of bwrap.",
     "OMEGA_PRIME_OMP_BIN": "Selects the omp executable used by the engine.",
     "OMEGA_PRIME_OMP_HOME": "Selects the omp configuration home directory.",
+    "OMEGA_PRIME_OMP_SANDBOX_ANDA": "Selects the omp-sandbox-anda wrapper executable used by the omp-sandbox engine backend.",
+    "OMEGA_PRIME_OMP_SANDBOX_WITHOUT_TOOLS": "Accepts, when set exactly to 1, that omp-sandbox engine stages run without Omega Prime's MCP tools and skills; the backend refuses readiness and runs otherwise.",
     "OMEGA_PRIME_PACKS_JSON": "Selects the configured tool-pack description file.",
     "OMEGA_PRIME_PACKS_JSON_FILE": "Names a protected file containing the tool-pack description setting.",
     "OMEGA_PRIME_PACK_API_BASES_JSON": "Selects the tool-pack API base configuration.",
@@ -117,6 +120,8 @@
     "OMEGA_PRIME_SWEEP_MENTIONS": "Controls mention processing during scheduled sweeps.",
     "OMEGA_PRIME_WORK_ROOT": "Selects the workspace root used by Omega Prime operations.",
     "OMEGA_PRIME_WORK_ROOT_FILE": "Names a protected file containing the Omega Prime workspace root.",
+    "OMP_SANDBOX_ROOT": "Selects the omp-sandbox package root the wrapper starts its TS core from.",
+    "OMP_SANDBOX_WORKSPACE_ROOTS": "Lists the allowlisted roots a job worktree may live under for the omp-sandbox backend.",
     "OPENAI_API_KEY": "Authenticates OpenAI API requests.",
     "OPENAI_API_KEY_FILE": "Names a protected file containing the OpenAI API credential.",
     "OPENCODE_API_KEY": "Authenticates OpenCode provider requests.",
@@ -516,7 +521,7 @@
       "reason": "Resolves the finite connector credential names declared in _CONNECTORS, including file selectors."
     },
     {
-      "site": "omega_prime/mcp_server.py:399:helper:omega_prime/mcp_server.py:_secret_present",
+      "site": "omega_prime/mcp_server.py:402:helper:omega_prime/mcp_server.py:_secret_present",
       "symbol": "_desk_child_model",
       "source_sha256": "b4f51ace92e35a2076320eaa6efa8a06dc345206998bc8a4ed33a94c06afa788",
       "names": [
@@ -529,7 +534,7 @@
       "reason": "Resolves only the finite provider credential names from the desk child provider declarations."
     },
     {
-      "site": "omega_prime/mcp_server.py:412:helper:omega_prime/integrations/binding.py:secret_value",
+      "site": "omega_prime/mcp_server.py:415:helper:omega_prime/integrations/binding.py:secret_value",
       "symbol": "_desk_child_model",
       "source_sha256": "b4f51ace92e35a2076320eaa6efa8a06dc345206998bc8a4ed33a94c06afa788",
       "names": [
@@ -608,11 +613,18 @@
   ],
   "supplements": [
     {
-      "site": "omega_prime/engine/jobs.py:274:environment.items",
+      "site": "omega_prime/engine/jobs.py:275:environment.items",
       "symbol": "child_env",
       "source_sha256": "66bbaa94289708bd30b8c66db94ad357667826ac001dbec82321331819d5ca59",
       "classification": "excluded",
       "reason": "Forwards arbitrary OMEGA_FAKE_OMP_ values exclusively to isolated fake-engine child processes; not operator configuration."
+    },
+    {
+      "site": "omega_prime/engine/sandbox_omp.py:271:environment.items",
+      "symbol": "wrapper_env",
+      "source_sha256": "b3b52fa4e1a47f6476a3ecff7fa79965b216806c767e7c65690a923396f3ca94",
+      "classification": "excluded",
+      "reason": "Forwards OMP_SANDBOX_ values unchanged to the omp-sandbox wrapper child, whose TS core reads and re-validates them; they are omp-sandbox settings, not Omega Prime configuration."
     },
     {
       "site": "omega_prime/dashboard/redact.py:44:environment.items",
@@ -806,7 +818,7 @@
   "metadata": {
     "token_selectors": [
       {
-        "site": "omega_prime/mcp_server.py:2186:args.token_env",
+        "site": "omega_prime/mcp_server.py:2189:args.token_env",
         "symbol": "_resolve_token",
         "source_sha256": "e04ec502c56de9c37869762a3519cac3470f599f455c9ec1b3343026091652d7",
         "reason": "The caller-selected environment key is an arbitrary MCP bearer-token selector, not a concrete setting name."

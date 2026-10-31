@@ -253,6 +253,9 @@ class _DeskParent:
         self._registry = registry
         self.child_model = model
         mapping = os.environ if env is None else env
+        # The host's resolved environment (settings.json included), so an
+        # engine-routed delegate sees the same state dir and settings.
+        self.engine_env: Mapping[str, str] | None = env
         # A server started for an engine child (omp -> this MCP server) runs
         # at that child's delegate depth, so the depth limit carries over.
         self.delegate_depth = _delegate_depth(mapping)

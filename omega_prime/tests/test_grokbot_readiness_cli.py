@@ -256,6 +256,14 @@ def _run_retention_producer(
     env = dict(os.environ)
     env["RUNNER_TEMP"] = str(seat)
     env["GITHUB_OUTPUT"] = str(github_output)
+    # The producer imports omega_prime.tooling.fs; script-dir sys.path does not
+    # include the repo root, so hand it over explicitly (no-ops where the
+    # package is pip-installed and keeps an existing PYTHONPATH working).
+    env["PYTHONPATH"] = (
+        str(ROOT)
+        if not env.get("PYTHONPATH")
+        else str(ROOT) + os.pathsep + env["PYTHONPATH"]
+    )
     completed = subprocess.run(
         [
             sys.executable,

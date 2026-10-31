@@ -1,0 +1,125 @@
+{
+  "task_id": "phase112-planning",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-21T15:20:00Z",
+  "completed_at": "2026-10-21T17:15:00Z",
+  "scope": "Planning only (task 00030 node n3): register Phase 112 in .planning/ROADMAP.md, write 112-CONTEXT.md and three file-disjoint execution plans 112-01/112-02/112-03 (omp-sandbox folded-ops coverage; omega_prime/engine omp-sandbox backend; fake-Anda engine tests). No product code, no omega_prime/ or omp-sandbox/ source changes, no push/PR/remote.",
+  "plan": {
+    "note": "Fallback lightweight plan (no XML uplift root in the dispatch; no PR per task rules — recorded here instead of a PR body).",
+    "nodes": [
+      { "id": "n1", "kind": "understand", "steps": ["Read uplift2.xml node n3 + ENGINE_BACKEND/GRACEFUL_DEGRADATION, got.json n3, AUDIT.md C1-C7, README-REFS.md", "Map the engine (omp_driver gates :428/:429 and probe :694-721, plan_router select/_STAGE_MODELS, attach delegate/ultrathink, sandbox.py bwrap, blocks.py raise_block)", "Map omp-sandbox (Anda client.rs stdio protocol, server.ts ops, core.ts folded ops + up()/attachTierForTests, paths.ts WORKSPACE_ROOTS, tests fixtures)", "Run baselines: tsc --noEmit exit 0, npm test 19/19 (the brief's bare-os()/implicit-any premise is already fixed at 52ce785)"], "status": "done" },
+      { "id": "n2", "kind": "register", "steps": ["Add Phase 112 (goal, W112-01..W112-05, success criteria) to the ROADMAP v21 section", "Retitle the v21 header to Phases 110-112; leave all Phase 110/111 content untouched", "Validate via gsd-tools query init.plan-phase 112 (phase_found true, Pending)"], "status": "done" },
+      { "id": "n3", "kind": "context", "steps": ["Write 112-CONTEXT.md (goal, task-brief correction, requirements, verified source map with file:line anchors, environment facts incl. pytest 9.1.1 baselines and the mcp/apscheduler gaps, decisions, pitfalls, out-of-scope, tracker)", "Ground every path/line claim in reads from this session at 52ce785"], "status": "done" },
+      { "id": "n4", "kind": "plan", "steps": ["gsd-planner subagent wrote 112-01-PLAN.md (omp-sandbox/** only), 112-02-PLAN.md (omega_prime/engine/** only), 112-03-PLAN.md (omega_prime/tests/** only, wave 2 depends_on 112-02)", "Lock the engine_plan keyword deviation (ultrathink_engine's plan positional is the spec; attach.py:174 precedent), stats[\"omp_sandbox\"] keys, OMEGA_PRIME_OMP_BACKEND/OMEGA_PRIME_OMP_SANDBOX_ANDA knobs", "Verify frontmatter, waves, threat-ID uniqueness, requirement coverage W112-01..05"], "status": "done" },
+      { "id": "n5", "kind": "critique", "steps": ["gsd-plan-checker iteration 1: FAIL (critical — 112-01 seeded ops unreachable under attachTierForTests because up() short-circuits on #ready; major — engine_plan untested; 3 minor) — planner revised: named attachTierForTests(tier, seed?) seam, sixth contract test, probe order, literals", "Iteration 2: FAIL (new defect — revised probe branch sat after :717-720, lexically behind sandbox_ready :715) — parent applied the checker's coherent placement (branch between :714/:715 performing omp_version itself) plus the minor residuals", "Iteration 3: PASS_WITH_FINDINGS (one cosmetic gate-order wording advisory — applied)"], "status": "done" },
+      { "id": "n6", "kind": "synthesize", "steps": ["Commit '00013 - plan phase 112 sbx-3 engine backend' (ROADMAP + CONTEXT + 3 PLANs + this receipt) with SPE-18303 trailer", "Leave git status --porcelain clean", "Report the plan checklist, evidence and unverified list"], "status": "done" }
+    ]
+  },
+  "commands": [
+    {
+      "cmd": "git branch --show-current && git log --oneline -8 && git status --porcelain",
+      "exit_code": 0,
+      "duration_s": 0.3,
+      "output_tail": "branch feat/sbx-3-engine-backend; HEAD 52ce785 '00013 - phase 111 summary, roadmap tick, execution receipt'; working tree clean",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "node .claude/gsd-core/bin/gsd-tools.cjs runtime-identity --raw && node .claude/gsd-core/bin/gsd-tools.cjs query init.plan-phase 112",
+      "exit_code": 0,
+      "duration_s": 0.6,
+      "output_tail": "@opengsd/gsd-core 1.18.0; phase_found true, phase_status Pending, has_context true, has_plans false, granularity fine, research_enabled false, plan_checker_enabled true, threat_id_duplicate_count 0",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "cd omp-sandbox && npm ci --ignore-scripts --no-audit --no-fund && npx tsc --noEmit",
+      "exit_code": 0,
+      "duration_s": 6.9,
+      "output_tail": "added 178 packages; tsc reports no errors (exit 0) — the task brief's bare-os()/implicit-any premise is already fixed at HEAD (2433e45 + Phase 110)",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "cd omp-sandbox && npm test",
+      "exit_code": 0,
+      "duration_s": 1.9,
+      "output_tail": "node --test core.test.ts paths.test.ts guards.test.ts: 19 tests, 19 pass, 0 fail",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "grep-tool surveys over omp-sandbox/tests: 'seed_repo|run_check|export_commits|py_deps' (0 hits — the folded ops are uncovered); over omp-sandbox/src/core/providers/openshell-podman.ts: 'os\\(' (every hit is this.#os(); over omega_prime: 'engine_plan' (attach.py:174 route_turn precedent), 'ultrathink_engine|delegate_via_engine' (attach.py:271/:373), dashboard 'def raise_block|clear_block|push_block' (blocks.py:38/:77/:95)",
+      "exit_code": 0,
+      "duration_s": 2.0,
+      "output_tail": "folded ops have zero test coverage; no bare os() calls remain; phase-111 block helper exists at HEAD",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "read crates/omp-sandbox-anda/src/{main,client,tools,serve,attestation}.rs, src/core/{server,core,config,paths}.ts, providers/{tiers,openshell-podman}.ts, tests/{guards,core}.test.ts, tests/fake-omp.mjs; omega_prime/engine/{omp_driver,plan_router,attach,sandbox}.py",
+      "exit_code": 0,
+      "duration_s": 1.5,
+      "output_tail": "anchors verified: client.rs stdio framing 82-171 (wrapper_ready, id-matched replies, poll_events pump, down drain, attestation mock); server.ts ops 41-51; core.ts up :62-66 short-circuit / attachTierForTests :69 / #seedRepo :123-136 / #put :138-148 / runCheck :176-188 / exportCommits :190-210 / runStage :230-244; paths.ts WORKSPACE_ROOTS :8; omp_driver EngineResult :86-104, run except :353-402, _run gates :425-435, probe :694-721; plan_router _STAGE_MODELS :44-47, select :393-452; attach delegate :271-309, ultrathink :373-427",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py",
+      "exit_code": 0,
+      "duration_s": 0.9,
+      "output_tail": "31 passed — root docs and public-repo checks green at the planning tree",
+      "phase": "baseline"
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_engine.py omega_prime/tests/test_engine_stage.py omega_prime/tests/test_dashboard_blocks.py",
+      "exit_code": 1,
+      "duration_s": 4.5,
+      "output_tail": "1 failed, 68 passed — the single failure is test_engine_stage.py::test_mcp_desk_parent_reads_the_stage_from_its_env, ModuleNotFoundError: No module named 'mcp' (pre-existing environment gap, not a regression: this stage changed no code)",
+      "phase": "baseline"
+    },
+    {
+      "cmd": "python3 -m omega_prime.tooling.prompt_format --check",
+      "exit_code": 0,
+      "duration_s": 0.4,
+      "output_tail": "prompt_format --check: all prompts conform to the XML standard",
+      "phase": "gate"
+    },
+    {
+      "cmd": "python3 -m omega_prime.tooling.catalog --check; python3 -m omega_prime.tooling.plugin --check; bash omega_prime/scripts/assemble-prompts.sh --check",
+      "exit_code": 1,
+      "duration_s": 1.2,
+      "output_tail": "all three fail at import: ModuleNotFoundError 'mcp' (catalog, plugin) and 'apscheduler' (assemble) — dependencies absent in this planning sandbox; no file in their scope (omega_prime sources, docs/, root *.md) was changed by this task",
+      "phase": "gate"
+    },
+    {
+      "cmd": "git add <5 planning files> .receipts/bot-00-omega-prime/phase112-planning.json && git commit -m '00013 - plan phase 112 sbx-3 engine backend' && git status --porcelain",
+      "exit_code": 0,
+      "duration_s": 0.4,
+      "output_tail": "commit b609415 on feat/sbx-3-engine-backend: 6 files, ~830 insertions (ROADMAP v21 Phase 112, 112-CONTEXT.md, 112-01/02/03-PLAN.md, this receipt); status clean afterward",
+      "phase": "commit"
+    }
+  ],
+  "claims": [
+    { "claim": "Planning ran on feat/sbx-3-engine-backend @ 52ce785 with a clean tree, and only .planning/ROADMAP.md, the four new files under .planning/phases/112-sbx3-engine-backend/, and this receipt were written; no product code", "evidence_command_index": 10 },
+    { "claim": "The task brief's 112-01 tsc premise is stale: at 52ce785 'npx tsc --noEmit' exits 0 (npm test 19/19) and every os( use in openshell-podman.ts is this.#os( — the real gap is that seed_repo/run_check/export_commits/py_deps have zero test coverage, which is what 112-01 plans", "evidence_command_index": [2, 3, 4] },
+    { "claim": "The Anda stdio protocol the 112-02 client implements is pinned from the in-tree crate (client.rs:82-171: wrapper_ready first line, {id,tool,args} in, {id,ok,result|error,code} out, unsolicited event lines, down reply-then-exit, attestation mock on every object), and the engine-side anchors (EngineResult :86-104 frozen shape, run except :353-402 phase-111 wiring, _run branch point between :428 and :429, probe block between :714 and :715) were read at HEAD", "evidence_command_index": 5 },
+    { "claim": "up() short-circuits once #ready is set (core.ts:62-63) and attachTierForTests sets it (:69), so the seeded folded ops are reachable in tests only through a seam — 112-01 plans exactly that named test-only seam after the checker's critical finding", "evidence_command_index": 5 },
+    { "claim": "Docs/public-repo checks are green at the planning tree (31 passed) and the engine suites' only failure is the pre-existing mcp-import gap (68 passed, 1 failed) — code untouched by this stage", "evidence_command_index": [6, 7] },
+    { "claim": "The three plans are file-disjoint (112-01: omp-sandbox/** incl. core.ts; 112-02: omega_prime/engine/**; 112-03: omega_prime/tests/**), waves 1/1/2 with 112-03 depending on 112-02, cover W112-01..W112-05 with no orphan, and gsd-plan-checker reached PASS_WITH_FINDINGS on iteration 3 (verdict subagent-reported; the two blocking findings were re-verified against core.ts:62-69 and omp_driver.py:694-721 by the parent before the fixes were applied)", "evidence_command_index": [1, 5] }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Execution-stage acceptance (112-01/02/03 SUMMARY criteria) is not verified here — this stage is planning only and wrote no code",
+    "gsd-plan-checker verdicts are subagent-reported (three iterations: FAIL, FAIL, PASS_WITH_FINDINGS); the parent re-verified the two blocking findings' code anchors directly but did not re-run the checker as a shell command",
+    "omega_prime tooling checks catalog/plugin/assemble-prompts could not run in this sandbox (mcp/apscheduler absent, exit 1 at import); prompt_format --check and pytest docs/public-repo did run green; no file in the failing checks' scope was changed",
+    "The PYTHONPATH=. prefix breaks 'python3 -m pytest' in this sandbox (No module named pytest) while the unprefixed form runs green; the executor environment ran the prefixed form green in phase 111 — baselines here were taken unprefixed from the repo root",
+    "Live interoperability with the real omp-sandbox-anda binary and the box dashboard is untestable from this sandbox; the plans pin the documented contracts (client.rs protocol, README-REFS.md store shape) instead"
+  ],
+  "files_changed": [
+    ".planning/ROADMAP.md",
+    ".planning/phases/112-sbx3-engine-backend/112-CONTEXT.md",
+    ".planning/phases/112-sbx3-engine-backend/112-01-PLAN.md",
+    ".planning/phases/112-sbx3-engine-backend/112-02-PLAN.md",
+    ".planning/phases/112-sbx3-engine-backend/112-03-PLAN.md",
+    ".receipts/bot-00-omega-prime/phase112-planning.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "git revert of the single planning commit restores ROADMAP.md and removes the phase 112 directory and receipt; no product code to roll back",
+  "approvals": [],
+  "approved_by": null
+}

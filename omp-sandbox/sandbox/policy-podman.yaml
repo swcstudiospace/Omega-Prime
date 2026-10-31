@@ -19,10 +19,18 @@ network_policies:
       - { host: chatgpt.com, port: 443, tls: skip }
       - { host: auth.openai.com, port: 443, tls: skip }
       - { host: api.z.ai, port: 443, tls: skip }
+      - { host: openrouter.ai, port: 443, tls: skip }
     binaries:
       - path: /opt/bunpkg/lib/node_modules/bun/bin/bun.exe
+  # Package admission (GSD plans) reads official npm metadata before the first install; omp's own
+  # fetch tool runs under Bun and agents also reach for curl/python3, so the read hosts must cover those
+  # binaries, not just node (run 20261021-083250: W3 blocked with 'official registry access failed').
   package_registries:
     endpoints:
       - { host: registry.npmjs.org, port: 443, tls: skip }
+      - { host: www.npmjs.com, port: 443, tls: skip }
     binaries:
       - path: /opt/node/bin/node
+      - path: /opt/bunpkg/lib/node_modules/bun/bin/bun.exe
+      - path: /usr/bin/curl
+      - path: /usr/bin/python3
