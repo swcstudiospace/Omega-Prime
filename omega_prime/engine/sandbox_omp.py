@@ -111,6 +111,30 @@ _POLL_TICK = 0.2
 # question/stage wait itself has NO deadline (phase-112 lock).
 _ANSWER_POLL = 1.0
 
+# The folder that holds the ``omega_prime`` package this process imported.
+# The watcher pane runs under herdr's or tmux's own environment (no
+# PYTHONPATH from here), so its argv names this import root explicitly.
+_IMPORT_ROOT = str(Path(__file__).resolve().parents[2])
+
+
+def watch_command(job_id: str, state: Path) -> list[str]:
+    """The pane argv that follows one run's feed, importable from anywhere."""
+    env_bin = shutil.which("env") or "/usr/bin/env"
+    return [
+        env_bin,
+        f"PYTHONPATH={_IMPORT_ROOT}",
+        sys.executable,
+        "-m",
+        "omega_prime.engine.watch",
+        job_id,
+        "--follow",
+        "--state-dir",
+        # Absolute: the pane runs in the worktree, so a relative state dir
+        # would name another feed.
+        str(state.resolve()),
+    ]
+
+
 _EOF = object()
 
 
@@ -729,17 +753,7 @@ def run_backend(
                     env,
                     cwd=work,
                     label=f"{task_id} {stage}",
-                    command=[
-                        sys.executable,
-                        "-m",
-                        "omega_prime.engine.watch",
-                        job_id,
-                        "--follow",
-                        "--state-dir",
-                        # Absolute: the pane runs in the worktree, so a
-                        # relative state dir would name another feed.
-                        str(state_dir(env).resolve()),
-                    ],
+                    command=watch_command(job_id, state_dir(env)),
                     session=f"omega-{job_id}",
                 )
             with contextlib.suppress(Exception):
@@ -751,6 +765,11 @@ def run_backend(
                 row_started = run_rows.start(
                     tasks_path, task_id, job_id=job_id, stage=stage, pane=pane
                 )
+            if interrupt is not None and interrupt.is_set():
+                # Pane and row setup can take a while (each herdr call may
+                # wait its full timeout): a stop that landed meanwhile still
+                # submits nothing. The finally block finishes a started row.
+                raise _cancelled("cancelled before the stage was submitted")
         stage_result = _tool(
             client,
             "run_gsd_stage",
@@ -1360,6 +1379,10 @@ def _wait_loop(
     clear what is left on any exit."""
     aborted = False
     last_answer_check = 0.0
+    # Questions whose block write failed (e.g. a full disk): retried every
+    # loop until the store takes them, so a brief write failure never
+    # leaves the wrapper waiting on a question nobody can see.
+    unraised: dict[str, dict[str, Any]] = {}
     # Events a tool call already logged and touched, still to be acted on.
     unhandled: list[dict[str, Any]] = list(early_events or [])
     while True:
@@ -1386,20 +1409,28 @@ def _wait_loop(
                 # A GSD follow-up question: raise it under its own stable id
                 # beside any other open one. A requestId-less question is
                 # informational only — append/touch already happened above.
-                rid = str(buffered.get("requestId"))
-                with contextlib.suppress(Exception):
-                    pending[rid] = _raise_question(
-                        tasks_path,
-                        task_id,
-                        stage,
-                        rid,
-                        _question_text(buffered),
-                        _question_ids(buffered),
-                    )
-                    last_answer_check = time.monotonic()
+                unraised[str(buffered.get("requestId"))] = buffered
+        for rid, question in list(unraised.items()):
+            if rid in pending:
+                unraised.pop(rid, None)
+                continue
+            try:
+                pending[rid] = _raise_question(
+                    tasks_path,
+                    task_id,
+                    stage,
+                    rid,
+                    _question_text(question),
+                    _question_ids(question),
+                )
+            except Exception:  # retried next loop; never fatal
+                continue
+            unraised.pop(rid, None)
+            last_answer_check = time.monotonic()
         if (
             done is None
             and pending
+            and not (interrupt is not None and interrupt.is_set())
             and time.monotonic() - last_answer_check >= _ANSWER_POLL
         ):
             last_answer_check = time.monotonic()
@@ -1409,6 +1440,8 @@ def _wait_loop(
                     answer = _answer_from_store(tasks_path, item_id)
                 if answer is None:
                     continue
+                if interrupt is not None and interrupt.is_set():
+                    break  # the abort below takes over
                 try:
                     client.call(
                         "answer_question",
@@ -1417,7 +1450,15 @@ def _wait_loop(
                             "request_id": rid,
                             **_answer_args(answer),
                         },
+                        None,
+                        interrupt,
                     )
+                except EngineError as exc:
+                    if exc.reason != "cancelled":
+                        raise
+                    # Stopped mid-reply: leave the item open (the answer
+                    # never landed) and let the abort below run now.
+                    break
                 except SandboxUnavailable as exc:
                     if "stale_answer" not in str(exc):
                         # Wrapper-level failure: propagate per the

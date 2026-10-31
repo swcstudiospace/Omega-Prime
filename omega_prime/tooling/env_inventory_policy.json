@@ -622,7 +622,7 @@
       "reason": "Forwards arbitrary OMEGA_FAKE_OMP_ values exclusively to isolated fake-engine child processes; not operator configuration."
     },
     {
-      "site": "omega_prime/engine/sandbox_omp.py:279:environment.items",
+      "site": "omega_prime/engine/sandbox_omp.py:303:environment.items",
       "symbol": "wrapper_env",
       "source_sha256": "b3b52fa4e1a47f6476a3ecff7fa79965b216806c767e7c65690a923396f3ca94",
       "classification": "excluded",

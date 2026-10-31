@@ -7,10 +7,10 @@ this module only opens a pane for an engine run and never touches tasks.json.
 
 One Herdr pane per sandbox run: ``herdr workspace create --cwd <cwd>
 --label <label> --no-focus`` yields a pane id, then ``herdr pane run
-<pane> <command...>`` points the pane at the run. The pane id parse is
-pinned (the herdr CLI is absent everywhere testable, so the fake runner
-follows the same contract): the LAST whitespace-separated token of the
-LAST non-empty stdout line of ``workspace create``.
+<pane> <shell command>`` points the pane at the run. Both follow the
+contract ``herdr_launch.launch`` already uses: the create reply is JSON
+and the pane id is ``result.root_pane.pane_id``; the run command is ONE
+``shlex.join(command)`` string, not separate arguments.
 
 Any failure — missing binary, non-zero exit, timeout, unparseable output,
 OSError — falls back to the engine's tmux session-spawn shape, re-implemented
@@ -26,7 +26,9 @@ receipts.
 
 from __future__ import annotations
 
+import json
 import os
+import shlex
 import shutil
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -48,12 +50,14 @@ def _child_env(env: Mapping[str, str]) -> dict[str, str]:
 
 
 def _parse_pane_id(stdout: str) -> str | None:
-    """Last whitespace-separated token of the last non-empty stdout line."""
-    for line in reversed(stdout.splitlines()):
-        tokens = line.split()
-        if tokens:
-            return tokens[-1]
-    return None
+    """``result.root_pane.pane_id`` from the JSON create reply, else ``None``."""
+    try:
+        pane = json.loads(stdout)["result"]["root_pane"]["pane_id"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(pane, str) or not pane.strip():
+        return None
+    return pane
 
 
 def _herdr_pane(
@@ -86,7 +90,7 @@ def _herdr_pane(
     if pane is None:
         return None
     run = subprocess.run(
-        [herdr, "pane", "run", pane, *command],
+        [herdr, "pane", "run", pane, shlex.join(command)],
         check=False,
         capture_output=True,
         text=True,

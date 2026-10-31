@@ -22,6 +22,8 @@ are asserted (T-112-10).
 from __future__ import annotations
 
 import json
+import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -283,7 +285,7 @@ for line in sys.stdin:
             emit({"event": "question", "stageId": stage_id, "requestId": "req-1", **QUESTION})
             emit({"event": "question", "stageId": stage_id, "requestId": "req-2", **MULTI})
             continue
-        if behavior in ("question", "question_reask"):
+        if behavior in ("question", "question_reask", "answer_hangs"):
             # The real wrapper holds stage_done until answer_question:
             # one question at a time, a requestId per ask (e2e.py).
             pending = {"stage": stage_id, "request": "req-1", "answered": False}
@@ -317,6 +319,9 @@ for line in sys.stdin:
                     emit({"event": "stage_done", "stageId": stage_id, "status": "completed"})
                 continue
             emit(stale)
+            continue
+        if behavior == "answer_hangs":
+            # The wrapper stays alive but never replies to the answer.
             continue
         if behavior == "question_reask" and pending is not None and not reasked:
             # The first answer ALWAYS arrives stale: the ask was already
@@ -431,8 +436,8 @@ def _install_fake_anda(tmp_path: Path, behavior: str) -> tuple[Path, Path]:
 _HERDR_FAKE = r'''#!/usr/bin/env python3
 """Fake herdr runner: argv receipts beside itself, mode-baked output.
 
-``ok`` mode prints a workspace line whose last whitespace token is the
-pane id (the pinned parse contract) and exits 0 for create/run;
+``ok`` mode prints the JSON create reply ``herdr_launch`` parses
+(``result.root_pane.pane_id``) and exits 0 for create/run;
 ``fail`` mode exits 1 on every call, receipts still written. The create
 receipt carries the exact pane id it printed so tests can compare the
 row's ``herdr_pane`` against what the launcher parsed. Stdlib only, no
@@ -453,12 +458,32 @@ if created:
 with open(LOG, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(row) + "\n")
 if created:
-    sys.stdout.write("workspace created %s\n" % row["pane"])
+    sys.stdout.write(
+        json.dumps({"result": {"root_pane": {"pane_id": row["pane"]}}}) + "\n"
+    )
     sys.exit(0)
 if MODE == "ok" and argv[:2] == ["pane", "run"]:
     sys.exit(0)
 sys.exit(1)
 '''
+
+
+def _watch_argv(job_id: str, state: Path) -> list[str]:
+    """The pinned watcher argv: explicit import root, then the module run."""
+    import omega_prime
+
+    root = str(Path(omega_prime.__file__).resolve().parent.parent)
+    return [
+        shutil.which("env") or "/usr/bin/env",
+        f"PYTHONPATH={root}",
+        sys.executable,
+        "-m",
+        "omega_prime.engine.watch",
+        job_id,
+        "--follow",
+        "--state-dir",
+        str(state.resolve()),
+    ]
 
 
 def _install_fake_herdr(tmp_path: Path, mode: str = "ok") -> tuple[Path, Path]:
@@ -1158,17 +1183,12 @@ def test_pane_label_and_watch_argv_are_pinned(tmp_path: Path) -> None:
         "gb:argv plan",
         "--no-focus",
     ]
+    # One shell string, as herdr_launch.launch sends it.
     assert pane_run["argv"] == [
         "pane",
         "run",
         create["pane"],
-        sys.executable,
-        "-m",
-        "omega_prime.engine.watch",
-        "job-argv",
-        "--follow",
-        "--state-dir",
-        str((tmp_path / "state").resolve()),
+        shlex.join(_watch_argv("job-argv", tmp_path / "state")),
     ]
 
 
@@ -1212,13 +1232,7 @@ def test_tmux_fallback_records_the_session(tmp_path: Path) -> None:
         "-s",
         "omega-job-tmux",
         "--",
-        sys.executable,
-        "-m",
-        "omega_prime.engine.watch",
-        "job-tmux",
-        "--follow",
-        "--state-dir",
-        str((tmp_path / "state").resolve()),
+        *_watch_argv("job-tmux", tmp_path / "state"),
     ]
     # The failed herdr create was receipted; pane run never happened.
     assert [e["argv"][:2] for e in _jsonl(herdr_log)] == [["workspace", "create"]]
@@ -1968,7 +1982,8 @@ def test_a_relative_state_dir_reaches_the_pane_absolute(
     assert result.ok is True, result.detail
     receipts = _jsonl(tmp_path / "bin" / "herdr-log.jsonl")
     pane_run = next(e for e in receipts if e["argv"][:2] == ["pane", "run"])
-    state = pane_run["argv"][pane_run["argv"].index("--state-dir") + 1]
+    watch = shlex.split(pane_run["argv"][3])
+    state = watch[watch.index("--state-dir") + 1]
     assert state == str((tmp_path / "rel-state").resolve())
     assert (Path(state) / "jobs").is_dir()
 
@@ -2344,3 +2359,114 @@ def test_a_string_tasks_path_still_raises_the_block_item(tmp_path: Path) -> None
     assert result.ok is False and result.reason == "sandbox_unavailable"
     items = _read_tasks(store)["waiting_on_ove"]
     assert [item["id"] for item in items] == ["gb:str:sandbox_unavailable"]
+
+
+def test_a_stop_during_pane_setup_still_submits_nothing(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Cancellation that lands while the pane opens is honoured pre-submit."""
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:pane-stop")])
+    interrupt = InterruptFlag()
+
+    def slow_pane(*_args: Any, **_kwargs: Any) -> None:
+        interrupt.set()  # the user stops the run while herdr is busy
+        return None
+
+    monkeypatch.setattr(sandbox_omp.sandbox_pane, "open_pane", slow_pane)
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-pane-stop",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:pane-stop",
+        interrupt=interrupt,
+    )
+    assert result.ok is False
+    assert result.reason == "cancelled"
+    tools = _wrapper_tools(log)
+    assert "run_gsd_stage" not in tools
+    assert "down" in tools
+    row = next(r for r in _read_tasks(store)["tasks"] if r["id"] == "gb:pane-stop")
+    assert row["state"] != "working", "a stopped run must not stay working"
+
+
+def test_a_failed_question_write_is_retried_not_lost(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """A transient block-write failure keeps the question scheduled."""
+    env, store, _log, work = _question_fixture(tmp_path, "question")
+    real = sandbox_omp._raise_question
+    calls: list[str] = []
+
+    def flaky(*args: Any, **kwargs: Any) -> str:
+        calls.append(str(args[3]))
+        if len(calls) == 1:
+            raise OSError("No space left on device")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sandbox_omp, "_raise_question", flaky)
+    box: dict[str, Any] = {}
+    failures: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            box["run"] = _run_tracked(env, work, store, "job-q-retry")
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    try:
+        _answer_when_raised(store, "gb:q:question:req-1", "the square one")
+    except BaseException as exc:
+        failures.append(exc)
+    thread.join(timeout=30.0)
+    _check_round_trip(box, failures, thread, "a retried question write")
+    assert box["run"].ok is True, box["run"].detail
+    assert calls[:2] == ["req-1", "req-1"]
+    assert _read_tasks(store)["waiting_on_ove"] == []
+
+
+def test_a_stop_while_an_answer_reply_hangs_aborts_promptly(tmp_path: Path) -> None:
+    """The answer_question wait honours the interrupt, then abort runs."""
+    env, store, log, work = _question_fixture(tmp_path, "answer_hangs")
+    interrupt = InterruptFlag()
+    outcome: dict[str, Any] = {}
+    worker = threading.Thread(
+        target=lambda: outcome.update(
+            result=run(
+                "plan the thing",
+                cwd=work,
+                env=env,
+                job_id="job-q-hang",
+                stage="plan",
+                plan="zai",
+                tasks_path=store,
+                task_id="gb:q",
+                interrupt=interrupt,
+            )
+        ),
+        daemon=True,
+    )
+    worker.start()
+    _answer_when_raised(store, "gb:q:question:req-1", "the square one")
+    deadline = time.monotonic() + 10.0
+    while "answer_question" not in _wrapper_tools(log):
+        if time.monotonic() > deadline:
+            raise AssertionError("the answer was never sent")
+        time.sleep(0.05)
+    began = time.monotonic()
+    interrupt.set()
+    worker.join(timeout=30.0)
+    assert not worker.is_alive(), "cancellation waited on the answer reply"
+    assert time.monotonic() - began < 30.0
+    assert outcome["result"].reason == "cancelled"
+    assert "abort" in _wrapper_tools(log)
