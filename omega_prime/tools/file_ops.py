@@ -349,7 +349,7 @@ def _split_keep(text: str) -> list[str]:
 def _line_text(line: str) -> str:
     if line.endswith("\r\n"):
         return line[:-2]
-    if line.endswith("\n") or line.endswith("\r"):
+    if line.endswith(("\n", "\r")):
         return line[:-1]
     return line
 

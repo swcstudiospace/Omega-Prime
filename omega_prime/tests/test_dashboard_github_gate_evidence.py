@@ -134,9 +134,7 @@ def test_default_branch_with_slash_and_dot_keeps_its_card():
                     }
                 ]
             ).encode()
-        if path.endswith("/commits/release%2F2026.10") or path.endswith(
-            "/commits/release/2026.10"
-        ):
+        if path.endswith(("/commits/release%2F2026.10", "/commits/release/2026.10")):
             return 200, b'{"sha":"relsha"}'
         if path.endswith("/status"):
             return 200, b'{"state":"success","statuses":[],"total_count":0}'

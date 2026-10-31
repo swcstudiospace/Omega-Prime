@@ -7,6 +7,7 @@
 
 - [Setup](setup.md)
 - [Local validation](local-validation.md)
+- [Code quality ratchet](code-quality.md)
 - [Configuration inventory](configuration.md)
 
 ## Use
@@ -32,6 +33,7 @@
 
 - [Build aesthetics](build-aesthetics.md)
 - [Architecture](architecture.md)
+- [Event-driven SDLC](sdlc-events.md)
 - [ADR 0001: Prime merge architecture](adr/0001-prime-merge-architecture.md)
 - [ADR 0002: Prime runtime integration](adr/0002-prime-runtime-integration.md)
 - [Tool catalog](tool-catalog.md)

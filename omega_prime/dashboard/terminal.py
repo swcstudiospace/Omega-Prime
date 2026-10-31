@@ -121,7 +121,7 @@ async def _read_pane(argv: list[str]) -> str:
             if re.search(
                 rb"(?i)(pane|session).{0,40}(closed|not found|does not exist)", stderr
             ):
-                raise PaneClosedError()
+                raise PaneClosedError
             raise OSError("Terminal capture unavailable")
         return b"".join(chunks).decode("utf-8", errors="replace")
     except BaseException:

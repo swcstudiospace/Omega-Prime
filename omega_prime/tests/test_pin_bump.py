@@ -3931,13 +3931,13 @@ def test_report_to_traversal_path_writes_only_the_named_file(
     workdir = tmp_path / "work" / "deep"
     workdir.mkdir(parents=True)
     monkeypatch.chdir(workdir)
-    before = {p for p in tmp_path.rglob("*")}
+    before = set(tmp_path.rglob("*"))
     rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to="../x.md")
     capsys.readouterr()
     assert rc == 0
     target = tmp_path / "work" / "x.md"
     assert "Verdict: improved" in target.read_text()
-    created = {p for p in tmp_path.rglob("*")} - before
+    created = set(tmp_path.rglob("*")) - before
     # The report plus whatever the bump itself changed under root; nothing
     # else outside root or the named file.
     assert target in created
