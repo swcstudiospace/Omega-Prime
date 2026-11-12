@@ -86,7 +86,7 @@ pandas==3.0.6
 pathspec==1.1.1
 pillow==13.0.0
 playwright==1.64.0
-pluggy==1.6.0
+pluggy==1.7.0
 propcache==0.5.4
 pyarrow==25.0.1
 pycparser==3.0
