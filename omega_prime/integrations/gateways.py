@@ -54,7 +54,7 @@ class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
     that redirects to another host would otherwise receive the bearer.
     """
 
-    def redirect_request(  # type: ignore[override]
+    def redirect_request(  # type: ignore[override,unused-ignore]
         self,
         req: urllib.request.Request,
         fp: Any,

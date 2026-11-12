@@ -26,9 +26,9 @@ class Tracer:
         self,
         kind: str,
         name: str,
-        fields: dict | None = None,
+        fields: dict[str, Any] | None = None,
         duration_ms: float | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Append one span. Return it."""
         cleaned = {
             str(key): redact_text(value) if isinstance(value, str) else value

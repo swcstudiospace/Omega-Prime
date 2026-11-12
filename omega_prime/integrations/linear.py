@@ -315,8 +315,9 @@ def _text(value: Any) -> str:
 
 def _graphql_message(errors: list[Any]) -> str:
     first = errors[0]
-    if isinstance(first, dict) and isinstance(first.get("message"), str):
-        return first["message"]
+    message = first.get("message") if isinstance(first, dict) else None
+    if isinstance(message, str):
+        return message
     return "Linear returned an error."
 
 

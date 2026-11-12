@@ -39,6 +39,7 @@ from omega_prime.tools.platform import PLATFORM_TOOL_NAMES
 from omega_prime.tools.prime_runtime import KERNEL_TOOL_NAMES
 from omega_prime.tools.quality import QUALITY_TOOL_NAMES
 from omega_prime.tools.redteam import REDTEAM_TOOL_NAMES
+from omega_prime.tools.registry import ToolRegistry
 from omega_prime.tools.rlm import RLM_TOOL_NAMES
 from omega_prime.tools.substrate_tools import SUBSTRATE_TOOL_NAMES
 from omega_prime.tools.systems import SYS_TOOL_NAMES
@@ -97,7 +98,7 @@ Rebuild with `--out docs/tool-catalog.md`; CI fails when this file drifts.
 """
 
 
-def full_inventory_registry(root: Path, home: Path):
+def full_inventory_registry(root: Path, home: Path) -> ToolRegistry:
     """Registry with every rostered family registered for metadata reads.
 
     The default registry config-gates Prime families (default off) and skips
