@@ -120,7 +120,8 @@ RUN groupadd --system --gid "${JOB_GID}" omega-ci-job \
        --home-dir /nonexistent --shell /usr/sbin/nologin omega-ci-job \
     && mkdir -p /var/lib/omega-ci/work \
     && chown root:root /var/lib/omega-ci /var/lib/omega-ci/work \
-    && chmod 0755 /var/lib/omega-ci /var/lib/omega-ci/work
+    && chmod 0755 /var/lib/omega-ci /var/lib/omega-ci/work \
+    && chown root:root /usr/bin && chmod 0755 /usr/bin
 # ^ 0755, not 0711: actions/runner refuses to start unless the job identity
 #   can READ its directory and every directory above it ("Permission to read
 #   the directory contents is required for ... and each directory up the
